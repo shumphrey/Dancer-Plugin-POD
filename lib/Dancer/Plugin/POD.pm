@@ -57,7 +57,7 @@ In your Dancer App :
 
 This plugin gives you a POD viewer for Dancer.
 The only thing you need to do is set the CSS
-and optionally a javascript code hightlighter.
+and optionally a javascript code highlighter.
 
 =head1 AUTHORS
 
@@ -145,24 +145,6 @@ EOF
 ## You can use these if you want to do your own rendering
 ###########################################################
 
-## Retrieve a hash reference of alphabetically sorted perl modules
-#register pod_listing => sub {
-#    my ( $dirs ) = @_;
-#    my @dirs = @$dirs if $dirs;
-#
-#    my @objects = list_files(@dirs);
-#
-#    my %files;
-#    foreach my $obj (@objects) {
-#        my ($l) = split //, $obj->{name};
-#        $l = uc($l);
-#        $files{$l} ||= [];
-#        push @{$files{$l}}, $obj;
-#    }
-#
-#    return \%files;
-#};
-
 register pod_listing => sub {
     my ( $dirs ) = @_;
     my @dirs = @$dirs if $dirs;
@@ -181,13 +163,21 @@ register pod_listing => sub {
         $m =~ s/^${namespace}::// if $namespace;
         my $count = $m =~ s/::.*//;
 
-        if ( $count && !defined $objects{$m}->{dir} ) {
-            my $name = $m;
-            $objects{$m}->{dir} = generate_link(0, $name, @dirs);
+        if ( $count && !defined $objects{"$m/"} ) {
+            my $name = "$m";
+            $objects{$name} = {
+                path    => path('', $url_prefix, @dirs, $name),
+                name    => $name,
+                type    => 0
+            };
         }
-        elsif (!defined $objects{$m}->{file} && $orig_m =~ /$m$/ ) {
+        elsif (!defined $objects{$m} && $orig_m =~ /$m$/ ) {
             my $name = File::Basename::basename($file);
-            $objects{$m}->{file} = generate_link(1, $name, @dirs);
+            $objects{$name} = {
+                path    => path('', $url_prefix, @dirs, $name),
+                name    => $name,
+                type    => 1
+            };
         }
     }
 
@@ -198,27 +188,12 @@ register pod_listing => sub {
         $l = uc($l);
         $names{$l} ||= [];
 
-        if ( $objects{$obj}->{dir} ) {
-            push @{$names{$l}}, $objects{$obj}->{dir};
-        }
-        if ( $objects{$obj}->{file} ) {
-            push @{$names{$l}}, $objects{$obj}->{file};
-        }
+        push @{$names{$l}}, $objects{$obj};
     }
 
     return \%names;
 };
 
-sub generate_link {
-    my ( $is_file, $name, @parts ) = @_;
-
-    my $class = $is_file ? 'pod_listing_file' : 'pod_listing_namespace';
-
-    my $link = sprintf('<a class="pod_listing_link %s" href="/%s">%s</a>',
-                       $class,
-                       join('/', $url_prefix, @parts, $name),
-                       $name);
-}
 
 ## Retrieve a Pod::HTMLEmbed::Entry object
 register pod => sub {
@@ -242,8 +217,8 @@ register render_pod_listing => sub {
 
     my $listing = <<EOF;
 <div id="pod_listing">
-    <h2 id="pod_listing_header">Perl Module List</h2>
     $breadcrumbs
+    <h2 id="pod_listing_header">Perl Module List</h2>
 EOF
     foreach my $key (sort keys %objectlists) {
         my $objects = $objectlists{$key};
@@ -252,8 +227,12 @@ EOF
 	<p class="pod_listing_section">$key</p>
 	<ul id="pod_listing_ul">
 EOF
+
         foreach my $obj (@$objects) {
-            $listing .= sprintf('<li class="pod_listing_li">%s</li>', $obj);
+            my $class = $obj->{type} ? 'pod_dir' : 'pod_file';
+            $listing .= sprintf('<li class="%s"><a href="%s">%s</a></li>', $class,
+                                                                           $obj->{path},
+                                                                           $obj->{name});
         }
         $listing .= "\t</ul>\n";
     }
@@ -268,62 +247,28 @@ EOF
 sub generate_breadcrumbs {
     my (undef, undef, @parts) = split(/\//, request->path);
 
-    my @breadcrumbs = (sprintf('<a class="pod_breadcrumb_link" href="/%s">ROOT</a>', $url_prefix)) if scalar(@parts);
+    
+    my @breadcrumbs = (sprintf('<li><a href="/%s">main</a></li>', $url_prefix)) if scalar(@parts);
     my $url = '';
     while ( my $part = shift @parts ) {
         $url .= "/$part";
         if ( scalar(@parts) ) {
-            push @breadcrumbs, sprintf('<a class="pod_breadcrumb_link" href="/%s%s">%s</a>', $url_prefix, $url, $part);
+            push @breadcrumbs, sprintf('<li><a href="/%s%s">%s</a></li>', $url_prefix, $url, $part);
         } else {
-            push @breadcrumbs, $part;
+            $part =~ s/\.(:?pm|pl|pod)$//;
+            push @breadcrumbs, "<li>$part</li>";
         }
     }
 
     my $links = join("\n", @breadcrumbs);
     my $html =<<EOF;
-<div id='pod_breadcrumbs'>
+<ul id='pod_breadcrumbs'>
     $links
-</div>
+</ul>
 EOF
 
     return $html;
 }
-
-
-## Find all the directories and files in these paths
-#sub list_files {
-#    my @dirs = @_;
-#
-#    my @search_paths = @$search_paths;
-#    my %objects;
-#    foreach my $search_path (reverse @search_paths) {
-#        my $path = path($search_path, @dirs);
-#
-#        next if !-d $path;
-#
-#        my $dh = DirHandle->new($path);
-#        while(defined(my $child = $dh->read)) {
-#            next if ( $child eq '.' || $child eq '..' );
-#
-#            my $file = path($path, $child);
-#            my $urlpath = path(@dirs, $child);
-#            my $url  = "/$url_prefix/$urlpath";
-#
-#            my $object = { name => $child,
-#                           url  => $url };
-#            if ( -d $file ) {
-#                $object->{type} = 'directory';
-#                $objects{$child} = $object;
-#            }
-#            elsif ( $file =~ m/\.(pm|pl)$/ ) {
-#                $object->{type} = 'file';
-#                $objects{$child} = $object;
-#            }
-#        }
-#    }
-#
-#    return map { $objects{$_} } sort keys %objects;
-#}
 
 
 ## Cache and return the module list
