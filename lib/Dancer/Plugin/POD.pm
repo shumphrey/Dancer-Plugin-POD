@@ -2,7 +2,7 @@
 
 Dancer::Plugin::POD - A plugin to display all the POD in your local lib.
 
-=head1 SYNOPSYS
+=head1 SYNOPSIS
 
 In your config.yml
 
@@ -74,17 +74,11 @@ use Dancer ':syntax';
 use Dancer::Plugin;
 
 use Carp;
-use DirHandle;
-use File::Basename qw();
-use File::Spec qw();
-use Pod::Simple::Search qw();
+use File::Find::Rule::Perl qw();
 use Pod::HTMLEmbed qw();
-
-use Data::Dumper;
 
 
 my $search_paths = plugin_setting()->{paths} or croak "No config for POD";
-
 my $url_prefix   = plugin_setting()->{prefix} || 'pod';
 
 my $pod_searcher = Pod::HTMLEmbed->new(search_dir   => $search_paths,
@@ -103,14 +97,13 @@ prefix "/$url_prefix" => sub {
         }
 
         my $objects = pod_listing($directories);
-        return render_pod_listing($objects, pop(@$directories));
+        return render_pod_listing($objects);
     };
 
     ## View actual POD
     get '/**' => sub {
         my ($module) = splat;
-        $module = join('::', @$module);
-        $module =~ s/\.(?:pl|pm|pod)$//;
+        $module = path(@$module);
 
         my $pod = pod($module);
         my $breadcrumbs = generate_breadcrumbs();
@@ -151,30 +144,28 @@ register pod_listing => sub {
 
     my $modules = get_modules();
 
-    my $namespace = join('::', @dirs);
+    my $namespace = path(@dirs);
 
     my %objects;
     foreach my $m (keys %$modules) {
-        next if $namespace && $m !~ /^${namespace}::/;
-
-        my $file = $modules->{$m};
+        next if $namespace && $m !~ m#^${namespace}/#;
 
         my $orig_m = $m;
-        $m =~ s/^${namespace}::// if $namespace;
-        my $count = $m =~ s/::.*//;
+        $m =~ s#^${namespace}/## if $namespace;
+        my $count = $m =~ s#/.*##;
 
         if ( $count && !defined $objects{"$m/"} ) {
-            my $name = "$m";
+            my $name = "$m/";
             $objects{$name} = {
-                path    => path('', $url_prefix, @dirs, $name),
+                path    => path(@dirs, $name),
                 name    => $name,
                 type    => 0
             };
         }
         elsif (!defined $objects{$m} && $orig_m =~ /$m$/ ) {
-            my $name = File::Basename::basename($file);
+            my $name = $m;
             $objects{$name} = {
-                path    => path('', $url_prefix, @dirs, $name),
+                path    => path(@dirs, $name),
                 name    => $name,
                 type    => 1
             };
@@ -182,6 +173,7 @@ register pod_listing => sub {
     }
 
 
+    ## Group alphabetically by first letter
     my %names;
     foreach my $obj (sort keys %objects) {
         my ($l) = split //, $obj;
@@ -199,21 +191,17 @@ register pod_listing => sub {
 register pod => sub {
     my ( $module ) = @_;
 
-    #my $pod = $pod_searcher->find($module);
     my $pod = $pod_searcher->load(get_modules()->{$module});
-
 };
 
 
 ## Returns HTML
 ## TODO: make less ugly.
 register render_pod_listing => sub {
-    my ($objectlists, $parent) = @_;
+    my ($objectlists) = @_;
     my %objectlists = %$objectlists;
 
     my $breadcrumbs = generate_breadcrumbs();
-
-    $parent ||= 'Root';
 
     my $listing = <<EOF;
 <div id="pod_listing">
@@ -224,13 +212,14 @@ EOF
         my $objects = $objectlists{$key};
 
         $listing .= <<EOF;
-	<p class="pod_listing_section">$key</p>
-	<ul id="pod_listing_ul">
+	<p name="pod_$key">$key</p>
+	<ul class="pod_listing_ul">
 EOF
 
         foreach my $obj (@$objects) {
             my $class = $obj->{type} ? 'pod_dir' : 'pod_file';
-            $listing .= sprintf('<li class="%s"><a href="%s">%s</a></li>', $class,
+            $listing .= sprintf('<li class="%s"><a href="/%s/%s">%s</a></li>', $class,
+                                                                           $url_prefix,
                                                                            $obj->{path},
                                                                            $obj->{name});
         }
@@ -276,8 +265,52 @@ sub get_modules {
     our $module_hash;
     if ( !defined $module_hash ) {
         my $include_lib  = plugin_setting()->{'include_inc'} || 0;
-        my $search = Pod::Simple::Search->new->inc($include_lib);
-        $module_hash = $search->survey(@$search_paths);
+        my $arch    = lc( $Config::Config{'archname'} );
+        my $ver_qr  = qr#^\d\.\d{1,2}\.\d/#;
+
+        my @search_paths = @$search_paths;
+        if ( $include_lib ) {
+            push @search_paths, @INC;
+        }
+        @search_paths = grep { -d $_ } @search_paths;
+        
+        my $rule = File::Find::Rule->or( File::Find::Rule->perl_module,
+                                         File::Find::Rule->perl_script,
+                                         File::Find::Rule->name('*.pod') )
+                                   ->not_name(qr/^\d/);
+
+        my %files;
+        foreach my $dir (@search_paths) {
+            $rule->start($dir);
+            while ( defined ( my $f = $rule->match ) ) {
+                my $orig = $f;
+
+                $f =~ s#^$dir/##;
+                $f =~ s#$ver_qr##;
+                $f =~ s#^$arch/##;
+
+                $f =~ s#^pod/(.*\.pod)$#$1#;
+
+                ## Prefer pod documents over pm files
+                if ( $f =~ /\.pod$/ ) {
+                    my $pm = $f;
+                    $pm =~ s/\.pod$//;
+                    $pm .= '.pm';
+                    if ( defined $files{$pm} && $files{$pm} =~ /\.pod$/ ) {
+                        $files{$pm} = $orig;
+                        delete $files{$f};
+                    }
+                    elsif ( !defined $files{$pm} ) {
+                        $files{$f} = $orig;
+                    }
+                }
+                elsif ( !defined $files{$f} ) {
+                    $files{$f} = $orig;
+                }
+            }
+        }
+
+        $module_hash = \%files;
     }
     return $module_hash;
 }
